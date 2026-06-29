@@ -1,0 +1,12 @@
+data/
+.claude/
+**/__pycache__/**
+**/logs/
+export_only_prof_dir/
+result/
+profiling/
+extra-info/
+extra_info/
+
+# Per-environment config (internal IPs / cluster-specific); use .env.example as template
+.env

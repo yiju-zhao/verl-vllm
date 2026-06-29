@@ -1,0 +1,57 @@
+Output requirements (read carefully — failures here will be auto-rejected):
+
+1. Final code goes in ONE ```python ... ``` block at the end of your response. Place all imports, kernels, helper functions, and the ModelNew class inside this single block. Anything outside this block is reasoning text and will be ignored.
+
+2. Required imports at the top of the block:
+   import torch
+   import torch_npu
+   import torch.nn as nn
+   import triton
+   import triton.language as tl
+
+3. ModelNew must have the SAME __init__ signature and the SAME forward signature as the given Model class. Pass the same args, return the same shape.
+
+4. Tensors live on device='npu' (not 'cuda'). The test harness moves inputs to NPU before calling forward. NEVER write `if not x.is_cuda: return torch.<op>(x)` — x.is_cuda is always False on NPU and that fallback breaks everything. Use `x.device` if you need it, never .is_cuda.
+
+5. Implement at least one operation as a custom @triton.jit kernel. You MAY keep existing nn.Module submodules (self.conv, self.linear, self.batch_norm, etc.) for ops where re-implementing in Triton is impractical (full conv, large matmul, batchnorm). Wrap your new kernel(s) in a small Python helper called from forward.
+
+6. CRITICAL — module-level constants and helper functions inside @triton.jit:
+   Triton's JIT cannot see plain Python globals. Both directly-used and helper-called constants raise `NameError: Cannot access global variable ... from within @jit'ed function`. Two correct patterns:
+
+   # WRONG — fails at JIT compile:
+   SQRT_2_OVER_PI = 0.7978845608
+   @triton.jit
+   def my_kernel(x_ptr, ...):
+       v = x * SQRT_2_OVER_PI       # NameError on SQRT_2_OVER_PI
+
+   # WRONG — same error if used in a helper:
+   def _gelu(x):
+       return 0.5 * x * (1.0 + tl.tanh(SQRT_2_OVER_PI * x))   # NameError
+   @triton.jit
+   def my_kernel(x_ptr, ...):
+       y = _gelu(tl.load(x_ptr))    # the helper's NameError surfaces here
+
+   # RIGHT — option A: declare as tl.constexpr at module scope
+   SQRT_2_OVER_PI: tl.constexpr = 0.7978845608
+
+   # RIGHT — option B: inline literals everywhere (safest)
+   @triton.jit
+   def my_kernel(x_ptr, ...):
+       v = x * 0.7978845608
+
+   # RIGHT — option C: pass as a constexpr kernel argument
+   @triton.jit
+   def my_kernel(x_ptr, ..., COEF: tl.constexpr):
+       v = x * COEF
+   my_kernel[grid](..., COEF=0.7978845608)
+
+   For tl.tanh, tl.exp, etc., these are tl.* functions and are always available — only YOUR-named globals are restricted.
+
+7. NPU triton specifics:
+   - Pick BLOCK_SIZE >= 4096. NPU caps the grid axis at 65535; with BLOCK_SIZE=1024 a tensor with >67M elements fails.
+   - Use mask-and-load for tail handling: `mask = offsets < n_elements; x = tl.load(ptr+offsets, mask=mask, other=0.0)`.
+   - Out-of-bounds loads/stores without `mask=` cause AICore vector-core exceptions (runtime error 507035). Always mask the tail.
+
+8. Do not introduce stochastic operations (no .uniform_(), no torch.randn() in forward, no dropout). Reference Model does not have these; ModelNew must be deterministic given the inputs.
+
+End your response with the closing ``` of the python block. Do not write any text after it.
