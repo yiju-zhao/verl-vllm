@@ -366,3 +366,33 @@ Practical guidance for vllm-0.18 RL on this stack:
    would require nearly all tokens degenerate — their failure (token-271 spike at
    TP2, early positions) is a different phenomenon; ours shows ZERO early-position
    anomalies.
+
+---
+
+## RL-2 — fully-async separation (the drkernel production deployment shape) — PASS
+
+`recipe.drkernel.main` is built on `verl.experimental.fully_async_policy`; we validated
+that core end-to-end on vLLM 0.18 with the minimal proxy (trloo + gsm8k + Qwen3-0.6B),
+scaled to the 2-Spark cluster: **TRAINER pool = 1 GPU (head), ROLLOUTER pool = 1 GPU
+(bruce) — fully separated, cross-node**. Launcher: `run_trloo_fullyasync_1p1.sh`.
+
+Result: 3/3 training steps (43/34/31 s/it), rc=0. **NCCL checkpoint-engine weight
+sync working**: `_fit_update_weights timing_s/param_sync ≈ 2.0–2.3 s`, param_version
+incrementing every step (`trigger_parameter_sync_step=1`) — this is the trainer→rollouter
+weight push the production deployment uses. Non-degenerate training (score 0.03→0.25,
+grad_norm 0.35→0.94). Rollouter streaming via FullyAsyncAgentLoopWorkers on bruce.
+
+Breakages fixed en route (all environment, no verl code changes):
+1. **cupy missing → "Checkpoint engine nccl not registered"** (conditional import
+   silently skips). Fix: `cupy-cuda13x` 14.1.1 (aarch64 manylinux wheel exists) on BOTH
+   nodes.
+2. **`naive` checkpoint backend is incompatible with fully-async** (Ray async actor
+   requires coroutine methods; naive has none). nccl backend is effectively required.
+3. **torchdata missing on bruce** (env drift after the mirror) → Ray's misleading
+   "actor does not have any coroutine functions" on FullyAsyncRollouter — actually an
+   ImportError during class deserialization on the worker node. Lesson: after
+   incremental pip installs on the head, re-diff site-packages dist-infos vs bruce.
+
+Remaining delta to the FULL drkernel form (→ RL-4): `recipe.drkernel.main` swaps in
+KernelAgentLoop + KernelAsyncRewardManager + KernelGYM server + kernel dataset + 8B
+model. The architecture underneath is what was just validated.
