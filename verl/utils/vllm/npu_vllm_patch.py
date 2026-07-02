@@ -105,9 +105,14 @@ def check_vllm_ascend_before_server_launch():
 
         return cur_device_type == AscendDeviceType.A2
 
-    if vllm.__version__ == "0.11.0":
+    from packaging import version as _ver
+
+    _v = _ver.parse(vllm.__version__)
+    if _ver.parse("0.11.0") <= _v < _ver.parse("0.13.0"):
         is_A2 = _is_ascend_soc_version_A2_v011_local()
-    elif vllm.__version__ == "0.13.0":
+    elif _v >= _ver.parse("0.13.0"):
+        # vLLM 0.13..0.18: AscendDeviceType + soc_version mapping unchanged from
+        # 0.13 (see scripts/vllm018_upgrade/NPU_API_AUDIT.md), so reuse v013 detection.
         is_A2 = _is_ascend_soc_version_A2_v013_local()
     else:
         is_A2 = False
@@ -194,8 +199,10 @@ if is_torch_npu_available(check_device=False):
     from packaging import version
 
     _VLLM_VERSION = version.parse(vllm.__version__)
-    if _VLLM_VERSION >= version.parse("0.13.0") and _VLLM_VERSION <= version.parse("0.14.0"):
-        # Disable flash_attn in RotaryEmbedding (NPU) when VLLM >= 0.13
+    if _VLLM_VERSION >= version.parse("0.13.0"):
+        # Disable flash_attn in RotaryEmbedding (NPU) when VLLM >= 0.13.
+        # vLLM 0.18 keeps ApplyRotaryEmb.__init__ + FusedMoE.weight_loader compatible
+        # with the 0.13-style patch (see scripts/vllm018_upgrade/NPU_API_AUDIT.md).
         from vllm.model_executor.layers.fused_moe import FusedMoE
 
         patch_vllm013_rotary_emb()
@@ -203,8 +210,10 @@ if is_torch_npu_available(check_device=False):
 
     VERL_NPU_ENABLE_A2_PATCH_VLLM_ASCEND_MC2 = bool(int(os.getenv("VERL_NPU_ENABLE_A2_PATCH_VLLM_ASCEND_MC2", "1")))
     if VERL_NPU_ENABLE_A2_PATCH_VLLM_ASCEND_MC2:
-        # only support vllm 0.13 and 0.11 now.
-        if _VLLM_VERSION >= version.parse("0.13.0") and _VLLM_VERSION <= version.parse("0.14.0"):
+        # vllm 0.11/0.12 use the 0.11-style wiring; vllm 0.13..0.18 use the
+        # 0.13-style wiring (vllm-ascend symbols unchanged through 0.18, see
+        # scripts/vllm018_upgrade/NPU_API_AUDIT.md).
+        if _VLLM_VERSION >= version.parse("0.13.0"):
             from vllm_ascend import ascend_forward_context
             from vllm_ascend.ops.linear_op import SequenceRowParallelOp
 
