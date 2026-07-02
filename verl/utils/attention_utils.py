@@ -35,9 +35,18 @@ def _get_attention_functions() -> tuple[Callable, Callable, Callable, Callable]:
             # are pure-torch (they do NOT call flash-attn's CUDA kernels), so fall back to
             # verl's own vendored copies to keep the FSDP unpad/pad log-prob path working.
             # No regression for envs that do have flash_attn: this only triggers on ImportError.
+            import logging
+
             from einops import rearrange
 
             from verl.utils.npu_flash_attn_utils import index_first_axis, pad_input, unpad_input
+
+            logging.getLogger(__name__).warning(
+                "flash_attn is not installed; falling back to verl's vendored pure-torch "
+                "pad/unpad helpers. Numerically equivalent but slower than flash-attn's "
+                "varlen kernels. (Note: the remove-padding and Megatron paths still import "
+                "flash_attn directly and are not covered by this fallback.)"
+            )
 
     _index_first_axis, _pad_input, _rearrange, _unpad_input = index_first_axis, pad_input, rearrange, unpad_input
 

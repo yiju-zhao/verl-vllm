@@ -213,3 +213,10 @@ Per-step numerics (the load-bearing check = train-engine vs rollout logprob cons
 **Conclusion:** Stage-1 (minimal-proxy RL pipeline on vLLM 0.18, single GPU) is DONE —
 the full `trloo` loop runs stably for ≥5 steps with sane, consistent numerics. No
 correctness hardening (fp32 logprob / rollout-sanitize) was needed at this scale.
+
+> Scope note (from final review): the `attention_utils.py` flash_attn→vendored fallback
+> only covers the no-remove-padding FSDP engine path used here. The remove-padding rmpad
+> helpers (`verl/utils/torch_functional.py`) and the Megatron paths still `import flash_attn`
+> directly, so they would still require flash_attn on a wheel-less CUDA build if
+> `use_remove_padding=True` or Megatron were used. Not a regression (pre-existing); flash_attn
+> is NOT globally optional in verl — only this Stage-1 FSDP path is.
