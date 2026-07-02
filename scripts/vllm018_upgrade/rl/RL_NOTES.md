@@ -308,3 +308,26 @@ over TCP-NCCL exceeding VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=300), not a deadlock.
 TP=1 pearson ≈0.99, TP=2 is the mismatch source (echoes the other team); if TP=1 is
 also ~0.8, it's an engine-pair difference (vllm bf16 vs FSDP+sdpa bf16) independent
 of TP.
+
+### Control result: TP=1 vs TP=2 — TP=2 is EXONERATED
+
+Same diagnostics, same cluster, single GPU (TP=1): pearson 0.752/0.808,
+diff_mean 0.084/0.055, fraction_low 10.6%/6.4%, is_min 2e-9 — **statistically
+identical to TP=2** (0.758/0.808, 0.083/0.056, 10.7%/6.6%, 2e-9).
+
+Conclusions:
+1. **Cross-node TP=2 on vllm 0.18 adds ZERO measurable logprob mismatch** — the TP
+   mechanism itself is numerically faithful on this stack. The other team's TP2-specific
+   blowup does not reproduce on CUDA (their issue is elsewhere: NPU kernels, their TP
+   impl, or their engine pair).
+2. The mismatch (pearson ~0.75-0.81) is inherent to the ENGINE PAIR on this box:
+   vllm-0.18 bf16 (FLASH_ATTN backend) rollout vs FSDP training engine forced to
+   **sdpa** + `use_remove_padding=False` + pure-torch pad fallback (no flash_attn
+   wheel for sm_121). Candidate contributors: attention-kernel numerics (sdpa vs FA2),
+   bf16 accumulation-order differences, tiny-model (0.6B) amplification.
+3. Extreme disagreements (probs_diff_max≈1, is_min≈2e-9) concentrate in isolated
+   tokens — same *shape* as the other team's token-271 spike, far smaller magnitude.
+4. Practical: token-IS truncation @2.0 already yields ESS 0.90-0.94 → verl's
+   rollout-correction is a workable mitigation as-is; for the drkernel config
+   (`use_rollout_log_probs=True`) either enable rollout_correction or align the
+   engine pair before trusting gradients.
