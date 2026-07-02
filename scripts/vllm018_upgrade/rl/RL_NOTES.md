@@ -176,3 +176,40 @@ grep -E "step:1|actor/.*loss|update_weights done|EXITED rc=" /tmp/rl_trloo_1step
 - `verl/utils/attention_utils.py` (breakage-3: presence-gated flash_attn -> vendored-copy
   fallback; the only verl source edit)
 
+
+---
+
+## Stage-1 DoD — multi-step + numerics (Task 3)
+
+Command (Task-2 launcher + longer responses so gsm8k answers aren't truncated → non-degenerate signal, per the Task-2 review's Minor finding):
+```
+STEPS=5 bash scripts/vllm018_upgrade/rl/run_trloo_qwen3_0.6b_gsm8k.sh \
+    data.max_response_length=768 actor_rollout_ref.rollout.n=8 2>&1 | tee /tmp/rl_trloo_5step.log
+```
+
+Result: **PASS.** All 5 `trloo` steps completed, `EXITED rc=0`, weight resync every step
+(`timing_s/update_weights` ~2.6s). **0 NaN/Inf** anywhere.
+
+Per-step numerics (the load-bearing check = train-engine vs rollout logprob consistency):
+
+| step | actor/ppo_kl | critic/score/mean | critic/advantages/mean | actor/pg_loss | actor/grad_norm |
+|---|---|---|---|---|---|
+| 1 | 0.0 | 0.031 | -0.0033 | 0.0033 | 1.93 |
+| 2 | 0.0 | 0.219 | -0.0318 | 0.0318 | 3.41 |
+| 3 | 0.0 | 0.219 | -0.0093 | 0.0093 | 2.50 |
+| 4 | 0.0 | 0.156 | -0.0299 | 0.0299 | 1.27 |
+| 5 | 0.0 | 0.219 | -0.0566 | 0.0566 | 2.64 |
+
+- **`actor/ppo_kl == 0.0` on every step** → train-engine log-prob equals the rollout
+  log-prob on the first inner epoch → importance ratio ≈ 1, NOT exploding and NOT
+  near-fully-masked. This is the failure mode the other team reported at TP2; on this
+  single-GPU CUDA path under vLLM 0.18 it is clean.
+- Non-degenerate this time (vs the Task-2 1-step run): the 0.6B model scores non-zero
+  gsm8k reward once responses fit in 768 tokens, so advantages, pg_loss and grad_norm
+  are all real/non-zero — the optimizer + weight-resync run on a genuine gradient.
+- `response_length/clip_ratio` ≈ 0.47 at step 5 (about half the responses hit the 768
+  cap), `response/aborted_ratio` = 0.0.
+
+**Conclusion:** Stage-1 (minimal-proxy RL pipeline on vLLM 0.18, single GPU) is DONE —
+the full `trloo` loop runs stably for ≥5 steps with sane, consistent numerics. No
+correctness hardening (fp32 logprob / rollout-sanitize) was needed at this scale.
