@@ -261,3 +261,50 @@ advantage/gradient; steps 2–5 non-degenerate.)
 rollout log-probs exactly; no ratio explosion, no mass masking. The failure mode the
 other team reported at TP2 (token-271 spike, ~97% RS masking) does NOT reproduce here.
 No fp32-logprob / rollout-sanitize hardening needed at this scale on CUDA.
+
+---
+
+## CORRECTION — proper consistency diagnostics (pearson / RS-IS ratio)
+
+**The earlier "numerics are CLEAN / ppo_kl=0" conclusions (Stage-1 and RL-3 above) used
+the wrong instrument.** In our config `old_log_prob` is recomputed by the training engine
+(`use_rollout_log_probs` not set) and batch==mini-batch → one update per step → `ppo_kl`
+is computed against the engine's own logprobs *before* the update → **trivially 0**. It
+never measured vllm-rollout vs train-engine consistency.
+
+Proper instruments (per verl's rollout-correction tooling; same ones the other team used):
+`actor_rollout_ref.rollout.calculate_log_probs=True` → `training/rollout_actor_probs_pearson_corr`
++ `training/rollout_probs_diff_*`; `algorithm.rollout_correction.rollout_is=token` →
+`rollout_corr/*` IS-ratio stats.
+
+TP=2 (two Sparks), Qwen3-0.6B bf16, sdpa training engine, 2 steps, no val:
+
+| metric | step 1 | step 2 |
+|---|---|---|
+| pearson_corr (rollout vs actor logprobs) | 0.758 | 0.808 |
+| probs_diff_mean / _max | 0.083 / ~1.0 | 0.056 / 1.0 |
+| rollout_is_mean (trunc@2) | 0.896 | 0.936 |
+| rollout_is fraction_low | 10.7% | 6.6% |
+| rollout_is_min | 2e-9 | 2e-9 |
+| eff_sample_size | 0.90 | 0.94 |
+
+**Verdict: train/rollout mismatch is REAL and non-trivial on this stack** — far milder
+than the other team's NPU/TP2 report (~97% RS masking vs our ~7-11% fraction_low), but
+pearson 0.76-0.81 is well below the ~0.99 a clean setup shows, and isolated tokens
+disagree completely (probs_diff_max≈1, is_min≈2e-9).
+
+Why prior runs still trained sanely: without `use_rollout_log_probs=True` the gradient
+uses engine-recomputed old_log_prob (self-consistent); the mismatch manifests as
+off-policy drift, not a poisoned ratio. The real drkernel config DOES use rollout
+logprobs, so this matters there.
+
+Also fixed en route: a second engine crash was stale-process memory (crashed run left
+~86 GB held on bruce; vllm init then saw 33.3/119.69 GiB free < 0.5 utilization —
+"EngineDeadError" runs must be followed by a node cleanup). The earlier
+`sample_tokens timed out` was slowness (1319-prompt validation + first logprobs pass
+over TCP-NCCL exceeding VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=300), not a deadlock.
+
+**Open question (control experiment running): TP=1 with identical diagnostics** — if
+TP=1 pearson ≈0.99, TP=2 is the mismatch source (echoes the other team); if TP=1 is
+also ~0.8, it's an engine-pair difference (vllm bf16 vs FSDP+sdpa bf16) independent
+of TP.
