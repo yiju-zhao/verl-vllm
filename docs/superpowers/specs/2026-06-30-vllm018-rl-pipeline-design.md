@@ -1,7 +1,10 @@
 # Goal: verl RL full pipeline on vLLM 0.18 (CUDA)
 
 - **Date:** 2026-06-30
-- **Status:** Design (goal doc) — pending review, then writing-plans
+- **Status:** Stage-1 (M0–M4, single-GPU minimal proxy) IMPLEMENTED & verified 2026-07-02 —
+  5 clean `trloo` steps on vLLM 0.18, `ppo_kl=0` (train/rollout logprob consistent), no
+  hardening needed at this scale (see `scripts/vllm018_upgrade/rl/RL_NOTES.md`). M5 (TP=2
+  RL), M6 (8B+KernelGYM), separation arch = follow-on plans RL-2/3/4, not started.
 - **Repo/branch:** `drkernel-verl-port-drkernel/` @ `vllm-0.18-upgrade`
 - **Depends on:** the vLLM 0.18 CUDA upgrade (DONE — imports clean, generation smoke PASS)
   and the TP=2 two-Spark cluster (DONE — `scripts/vllm018_upgrade/TP2_CLUSTER_RUNBOOK.md`).
