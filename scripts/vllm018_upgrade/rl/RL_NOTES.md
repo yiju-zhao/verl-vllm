@@ -220,3 +220,44 @@ correctness hardening (fp32 logprob / rollout-sanitize) was needed at this scale
 > directly, so they would still require flash_attn on a wheel-less CUDA build if
 > `use_remove_padding=True` or Megatron were used. Not a regression (pre-existing); flash_attn
 > is NOT globally optional in verl — only this Stage-1 FSDP path is.
+
+---
+
+## RL-3 — TP=2 across the two Sparks (goal-doc M5)
+
+Launcher: `run_trloo_tp2.sh` (rollout TP=2 spanning gx10-090e + spark-bruce over 200G
+ConnectX; existing Ray cluster on :6380; per-node VLLM_HOST_IP from ray-start env).
+
+Breakages hit & fixed on the way:
+1. **Ray memory monitor kills bruce workers** — GB10 unified memory makes vLLM's GPU
+   preallocation look like huge process RSS; the node had 111 GB free. Fix:
+   `RAY_memory_monitor_refresh_ms=0` in the ray-start env on both nodes.
+2. **Foreign root-owned Ray on :6379** — our cluster moved to `--port=6380`.
+3. **verl bug: boolean False dropped from vllm server CLI** —
+   `build_cli_args_from_config` skipped False booleans, so
+   `engine_kwargs.vllm.enable_flashinfer_autotune=False` never reached `vllm serve`,
+   the platform default (True) applied, and the flashinfer autotuner hung over
+   cross-node TCP-NCCL (same hang as the TP=2 inference bring-up). Fixed: False now
+   emits `--no-<flag>` (vLLM bool args are argparse.BooleanOptionalAction; verified
+   end-to-end through AsyncEngineArgs + FlexibleArgumentParser).
+
+Result: **PASS.** STEPS=5, rc=0, cross-node placement confirmed (FSDP WorkerDict rank1,
+vLLMHttpServer, AgentLoopWorkers on 192.168.1.106). ~81 s/step (gen ~30 s — TCP-NCCL
+cross-node all-reduce; RoCE tuning would cut this), update_weights ~4.5 s/step.
+
+| step | actor/ppo_kl | critic/score/mean | actor/pg_loss | actor/grad_norm |
+|---|---|---|---|---|
+| 1 | 0.0 | 0.0     | 0.0    | 0.0   |
+| 2 | 0.0 | 0.141   | 0.0155 | 1.22  |
+| 3 | 0.0 | 0.297   | 0.0279 | 1.86  |
+| 4 | 0.0 | 0.219   | 0.0284 | 1.69  |
+| 5 | 0.0 | 0.266   | 0.0379 | 2.52  |
+
+0 NaN/Inf; `response/aborted_ratio` 0.0. (Step 1's batch scored 0 → legitimately zero
+advantage/gradient; steps 2–5 non-degenerate.)
+
+**Conclusion: vLLM 0.18 TP=2 RL training numerics are CLEAN on this stack** —
+`ppo_kl == 0` every step means the train-engine log-probs match the cross-node TP=2
+rollout log-probs exactly; no ratio explosion, no mass masking. The failure mode the
+other team reported at TP2 (token-271 spike, ~97% RS masking) does NOT reproduce here.
+No fp32-logprob / rollout-sanitize hardening needed at this scale on CUDA.
