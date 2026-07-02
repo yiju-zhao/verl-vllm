@@ -13,6 +13,9 @@
 
 import logging
 
+import os
+import time
+
 import torch
 
 from verl.protocol import DataProto
@@ -112,6 +115,26 @@ def calculate_debug_metrics(data: DataProto) -> dict:
 
     pearson_corrcoef = pearson_correlation_coefficient(actor_probs, rollout_probs, response_mask_bool)
     rollout_probs_diff = calculate_log_prob_diff(actor_probs, rollout_probs, response_mask_bool)
+
+    # Optional per-token diagnostic dump for offline mismatch localization
+    # (which positions/tokens disagree). Gated by env var; writes one file per call.
+    dump_dir = os.environ.get("VERL_LOGPROB_DIAG_DUMP")
+    if dump_dir:
+        try:
+            os.makedirs(dump_dir, exist_ok=True)
+            fn = os.path.join(dump_dir, f"logprob_diag_{int(time.time() * 1000)}.pt")
+            torch.save(
+                {
+                    "rollout_log_probs": rollout_old_log_probs.detach().cpu(),
+                    "actor_log_probs": actor_old_log_probs.detach().cpu(),
+                    "response_mask": response_mask.detach().cpu(),
+                    "responses": responses.detach().cpu(),
+                },
+                fn,
+            )
+            logger.warning("logprob diagnostic batch dumped to %s", fn)
+        except Exception:  # noqa: BLE001 — diagnostics must never break training
+            logger.exception("logprob diag dump failed")
     return {
         "training/rollout_probs_diff_valid": 1,
         "training/rollout_probs_diff_max": torch.max(rollout_probs_diff).detach().item(),

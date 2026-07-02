@@ -331,3 +331,38 @@ Conclusions:
    rollout-correction is a workable mitigation as-is; for the drkernel config
    (`use_rollout_log_probs=True`) either enable rollout_correction or align the
    engine pair before trusting gradients.
+
+### ROOT CAUSE FOUND — token-level localization (final)
+
+Per-token dump (`VERL_LOGPROB_DIAG_DUMP` hook in `verl/utils/debug/metrics.py`,
+analyzer `analyze_logprob_diag.py`), one step, TP=1, 64 seqs x 768 tokens:
+
+- Extreme disagreements (prob diff>0.5): **0% in deciles 0-7** of every sequence;
+  16.6% in decile 8, **62% in decile 9**. Onset varies per sequence (~630-660) →
+  content-dependent, not positional. 40/64 last tokens extreme, 0/64 first tokens.
+- Offending tokens: '0', ' ', '1', ',', '.', ' the' — **degenerate numeric repetition
+  loops** in sequences that hit the 768 cap (48/64 capped; clip_ratio 0.47).
+- Direction: rollout-confident/actor-not on 3650/3655 extreme tokens.
+
+**Pearson on healthy tokens: 0.9993; fraction_low: 0.00%.** The vllm-0.18 / FSDP
+engine pair is numerically excellent everywhere except chaotic repetition tails,
+where peaked distributions amplify any engine difference into full flips.
+
+Final attribution table:
+| hypothesis | verdict |
+|---|---|
+| TP=2 tensor-parallel numerics | innocent (identical to TP=1) |
+| attention kernel (sdpa vs eager) | minor (~+0.02 pearson) |
+| training-side bf16 forward | innocent (fp32 changed nothing) |
+| sampling scaling (temp/top-p) | innocent (1.0/1.0/-1) |
+| **degenerate truncated-tail tokens** | **ROOT CAUSE (100% of extremes)** |
+
+Practical guidance for vllm-0.18 RL on this stack:
+1. The engine pair needs NO numeric hardening (no fp32-logprob, no kernel work).
+2. Handle degenerate tails with standard RL hygiene: overlong filtering/penalty,
+   adequate max_response_length for the task, and/or rollout-correction RS/veto
+   (token-IS trunc@2 gives ESS 0.90+; RS would mask exactly these tails).
+3. Reinterpretation of the other team's ~97% RS masking: on our stack that magnitude
+   would require nearly all tokens degenerate — their failure (token-271 spike at
+   TP2, early positions) is a different phenomenon; ours shows ZERO early-position
+   anomalies.
