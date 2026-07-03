@@ -84,3 +84,40 @@ fix will be a version-gated change (won't regress the CUDA path) and I'll re-ver
 ## What "done" looks like
 `smoke_rollout_npu.py` prints `SMOKE PASS` on the Ascend box under vLLM 0.18 +
 vllm-ascend 0.18, with step 4 clean. That closes Milestone B.
+
+---
+
+## RL validation ladder on NPU (mirrors the validated CUDA sequence)
+
+After step 5 (inference smoke) passes, climb the same ladder we validated on CUDA —
+all scripts live in `scripts/vllm018_upgrade/rl/` (CUDA originals) and
+`scripts/vllm018_upgrade/rl/npu/` (NPU mirrors):
+
+1. **Data prep** (once): `bash scripts/vllm018_upgrade/rl/prep_gsm8k.sh`
+   (uses `$PY`; edit the interpreter path for your env).
+2. **Colocated RL + numerics** (1 NPU):
+   `STEPS=5 bash scripts/vllm018_upgrade/rl/npu/run_trloo_npu.sh`
+   Watch: 5 steps rc=0; `training/rollout_actor_probs_pearson_corr` and
+   `rollout_corr/*` in the step lines. CUDA reference: raw pearson 0.75-0.83
+   dominated by truncated-tail degeneration; healthy-token pearson 0.9993,
+   would-be RS rate 0%. To localize any NPU mismatch the same way:
+   `VERL_LOGPROB_DIAG_DUMP=/tmp/logprob_diag` env (+ pass it into the Ray runtime env
+   via `+ray_kwargs.ray_init.runtime_env.env_vars.VERL_LOGPROB_DIAG_DUMP=/tmp/logprob_diag`),
+   then `python scripts/vllm018_upgrade/rl/analyze_logprob_diag.py`.
+   **This is where the token-271 / mass-RS-masking signature would show if the NPU
+   stack has it** — check the analyzer's decile histogram (early-position anomalies)
+   and per-sequence patterns.
+3. **Fully-async separation** (2 NPUs, the drkernel production shape):
+   `bash scripts/vllm018_upgrade/rl/npu/run_trloo_fullyasync_npu.sh`
+   Watch: Rollouter/Trainer on separate NPUs, `_fit_update_weights timing_s/param_sync`
+   per step (checkpoint-engine backend name is "nccl"; on NPU the registry resolves it
+   to the HCCL implementation — no cupy needed). CUDA reference: 3/3 steps, ~2s/sync.
+4. If attention/padding breaks in step 2/3, retry with `ATTN_FALLBACK=1` (eager +
+   no-remove-padding — the conservative config validated on CUDA).
+
+Known-unknowns to watch on NPU (cannot be verified from the CUDA side):
+- the two items in NPU_API_AUDIT.md (rotary `super().__init__`, FusedMoE.weight_loader);
+- HCCL checkpoint engine registration on the Ascend stack (`python -c "import
+  verl.checkpoint_engine; from verl.checkpoint_engine.base import
+  CheckpointEngineRegistry as R; print(R._registry.keys())"` should list `nccl`);
+- vllm-ascend server mode (`rollout.mode=async`) compatibility.
