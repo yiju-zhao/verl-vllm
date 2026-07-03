@@ -6,11 +6,16 @@
 PY="${PY:-python3}"
 fail=0
 ck() { # ck <name> <expected-hint> <python-code>
-  out=$($PY -c "$3" 2>&1 | tail -1)
-  if [ $? -eq 0 ] && [ -n "$out" ] && ! echo "$out" | grep -qiE "error|traceback|No module"; then
-    echo "PASS  $1: $out"
+  # Verdict by EXIT CODE (assert/exception => non-zero), not by grepping "error":
+  # Ascend runtime prints noisy [ERROR]/ERR99999 lines to stdout during import even
+  # when everything works, which caused false FAILs. Filter them from display only.
+  raw=$($PY -c "$3" 2>/dev/null); rc=$?
+  out=$(echo "$raw" | grep -vE "^\[|ERR[0-9]+|^$" | tail -1)
+  if [ $rc -eq 0 ]; then
+    echo "PASS  $1: ${out:-ok}"
   else
-    echo "FAIL  $1: $out   (期望: $2)"; fail=1
+    err=$($PY -c "$3" 2>&1 | tail -1)
+    echo "FAIL  $1: $err   (期望: $2)"; fail=1
   fi
 }
 
