@@ -105,6 +105,16 @@ def get_vllm_max_lora_rank(lora_rank: int):
 
 # https://github.com/vllm-project/vllm/issues/13175
 def monkey_patch_compute_logits(model, vocab_size: int):
+    """Mask out-of-vocab logits (>= vocab_size, i.e. lm_head padding rows) to -inf so
+    the model can never sample an OOV token (vLLM returns -inf logprobs for them,
+    which rejects whole sequences downstream).
+
+    TP caveat: when compute_logits returns TP-SHARDED logits (observed on
+    vllm-ascend), each rank only holds a contiguous vocab shard; the naive
+    ``logits[..., vocab_size:]`` slice is empty on every shard except the last and
+    the mask silently does nothing (the token-271 post-mortem's OOV-151669 leak).
+    Handle both layouts by masking in GLOBAL vocab coordinates.
+    """
     original_compute_logits = model.compute_logits
 
     def compute_logits(
@@ -113,7 +123,20 @@ def monkey_patch_compute_logits(model, vocab_size: int):
         **kwargs,
     ) -> torch.Tensor:
         logits = original_compute_logits(*args, **kwargs)
-        logits[..., vocab_size:] = float("-inf")
+        if logits is None:
+            return logits
+        local_dim = logits.shape[-1]
+        if local_dim >= vocab_size:
+            # full (padded) vocab on this rank — the simple slice is correct
+            logits[..., vocab_size:] = float("-inf")
+        else:
+            # TP-sharded logits: mask columns whose GLOBAL index >= vocab_size
+            from vllm.distributed import get_tensor_model_parallel_rank
+
+            start = get_tensor_model_parallel_rank() * local_dim
+            local_cut = max(0, vocab_size - start)
+            if local_cut < local_dim:
+                logits[..., local_cut:] = float("-inf")
         return logits
 
     model.compute_logits = MethodType(compute_logits, model)
@@ -366,7 +389,10 @@ def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
     Handles different value types appropriately:
     - None: skipped
     - bool True: adds '--key'
-    - bool False: skipped
+    - bool False: adds '--no-key' (vLLM registers bool engine args with
+      argparse.BooleanOptionalAction, which creates --<name>/--no-<name> pairs;
+      silently dropping False would leave the vLLM default in effect, ignoring
+      an explicit user override such as enable_flashinfer_autotune=False)
     - list: expands to '--key item1 item2 ...'
     - empty list: skipped (vLLM uses nargs="+" which requires at least one value)
     - dict: JSON serialized
@@ -385,6 +411,8 @@ def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
         if isinstance(v, bool):
             if v:
                 cli_args.append(f"--{k}")
+            else:
+                cli_args.append(f"--no-{k}")
         elif isinstance(v, list):
             if not v:
                 # Skip empty lists - vLLM uses nargs="+" which requires at least one value

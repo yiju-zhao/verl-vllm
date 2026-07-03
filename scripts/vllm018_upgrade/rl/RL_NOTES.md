@@ -220,3 +220,179 @@ correctness hardening (fp32 logprob / rollout-sanitize) was needed at this scale
 > directly, so they would still require flash_attn on a wheel-less CUDA build if
 > `use_remove_padding=True` or Megatron were used. Not a regression (pre-existing); flash_attn
 > is NOT globally optional in verl — only this Stage-1 FSDP path is.
+
+---
+
+## RL-3 — TP=2 across the two Sparks (goal-doc M5)
+
+Launcher: `run_trloo_tp2.sh` (rollout TP=2 spanning gx10-090e + spark-bruce over 200G
+ConnectX; existing Ray cluster on :6380; per-node VLLM_HOST_IP from ray-start env).
+
+Breakages hit & fixed on the way:
+1. **Ray memory monitor kills bruce workers** — GB10 unified memory makes vLLM's GPU
+   preallocation look like huge process RSS; the node had 111 GB free. Fix:
+   `RAY_memory_monitor_refresh_ms=0` in the ray-start env on both nodes.
+2. **Foreign root-owned Ray on :6379** — our cluster moved to `--port=6380`.
+3. **verl bug: boolean False dropped from vllm server CLI** —
+   `build_cli_args_from_config` skipped False booleans, so
+   `engine_kwargs.vllm.enable_flashinfer_autotune=False` never reached `vllm serve`,
+   the platform default (True) applied, and the flashinfer autotuner hung over
+   cross-node TCP-NCCL (same hang as the TP=2 inference bring-up). Fixed: False now
+   emits `--no-<flag>` (vLLM bool args are argparse.BooleanOptionalAction; verified
+   end-to-end through AsyncEngineArgs + FlexibleArgumentParser).
+
+Result: **PASS.** STEPS=5, rc=0, cross-node placement confirmed (FSDP WorkerDict rank1,
+vLLMHttpServer, AgentLoopWorkers on 192.168.1.106). ~81 s/step (gen ~30 s — TCP-NCCL
+cross-node all-reduce; RoCE tuning would cut this), update_weights ~4.5 s/step.
+
+| step | actor/ppo_kl | critic/score/mean | actor/pg_loss | actor/grad_norm |
+|---|---|---|---|---|
+| 1 | 0.0 | 0.0     | 0.0    | 0.0   |
+| 2 | 0.0 | 0.141   | 0.0155 | 1.22  |
+| 3 | 0.0 | 0.297   | 0.0279 | 1.86  |
+| 4 | 0.0 | 0.219   | 0.0284 | 1.69  |
+| 5 | 0.0 | 0.266   | 0.0379 | 2.52  |
+
+0 NaN/Inf; `response/aborted_ratio` 0.0. (Step 1's batch scored 0 → legitimately zero
+advantage/gradient; steps 2–5 non-degenerate.)
+
+**Conclusion: vLLM 0.18 TP=2 RL training numerics are CLEAN on this stack** —
+`ppo_kl == 0` every step means the train-engine log-probs match the cross-node TP=2
+rollout log-probs exactly; no ratio explosion, no mass masking. The failure mode the
+other team reported at TP2 (token-271 spike, ~97% RS masking) does NOT reproduce here.
+No fp32-logprob / rollout-sanitize hardening needed at this scale on CUDA.
+
+---
+
+## CORRECTION — proper consistency diagnostics (pearson / RS-IS ratio)
+
+**The earlier "numerics are CLEAN / ppo_kl=0" conclusions (Stage-1 and RL-3 above) used
+the wrong instrument.** In our config `old_log_prob` is recomputed by the training engine
+(`use_rollout_log_probs` not set) and batch==mini-batch → one update per step → `ppo_kl`
+is computed against the engine's own logprobs *before* the update → **trivially 0**. It
+never measured vllm-rollout vs train-engine consistency.
+
+Proper instruments (per verl's rollout-correction tooling; same ones the other team used):
+`actor_rollout_ref.rollout.calculate_log_probs=True` → `training/rollout_actor_probs_pearson_corr`
++ `training/rollout_probs_diff_*`; `algorithm.rollout_correction.rollout_is=token` →
+`rollout_corr/*` IS-ratio stats.
+
+TP=2 (two Sparks), Qwen3-0.6B bf16, sdpa training engine, 2 steps, no val:
+
+| metric | step 1 | step 2 |
+|---|---|---|
+| pearson_corr (rollout vs actor logprobs) | 0.758 | 0.808 |
+| probs_diff_mean / _max | 0.083 / ~1.0 | 0.056 / 1.0 |
+| rollout_is_mean (trunc@2) | 0.896 | 0.936 |
+| rollout_is fraction_low | 10.7% | 6.6% |
+| rollout_is_min | 2e-9 | 2e-9 |
+| eff_sample_size | 0.90 | 0.94 |
+
+**Verdict: train/rollout mismatch is REAL and non-trivial on this stack** — far milder
+than the other team's NPU/TP2 report (~97% RS masking vs our ~7-11% fraction_low), but
+pearson 0.76-0.81 is well below the ~0.99 a clean setup shows, and isolated tokens
+disagree completely (probs_diff_max≈1, is_min≈2e-9).
+
+Why prior runs still trained sanely: without `use_rollout_log_probs=True` the gradient
+uses engine-recomputed old_log_prob (self-consistent); the mismatch manifests as
+off-policy drift, not a poisoned ratio. The real drkernel config DOES use rollout
+logprobs, so this matters there.
+
+Also fixed en route: a second engine crash was stale-process memory (crashed run left
+~86 GB held on bruce; vllm init then saw 33.3/119.69 GiB free < 0.5 utilization —
+"EngineDeadError" runs must be followed by a node cleanup). The earlier
+`sample_tokens timed out` was slowness (1319-prompt validation + first logprobs pass
+over TCP-NCCL exceeding VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=300), not a deadlock.
+
+**Open question (control experiment running): TP=1 with identical diagnostics** — if
+TP=1 pearson ≈0.99, TP=2 is the mismatch source (echoes the other team); if TP=1 is
+also ~0.8, it's an engine-pair difference (vllm bf16 vs FSDP+sdpa bf16) independent
+of TP.
+
+### Control result: TP=1 vs TP=2 — TP=2 is EXONERATED
+
+Same diagnostics, same cluster, single GPU (TP=1): pearson 0.752/0.808,
+diff_mean 0.084/0.055, fraction_low 10.6%/6.4%, is_min 2e-9 — **statistically
+identical to TP=2** (0.758/0.808, 0.083/0.056, 10.7%/6.6%, 2e-9).
+
+Conclusions:
+1. **Cross-node TP=2 on vllm 0.18 adds ZERO measurable logprob mismatch** — the TP
+   mechanism itself is numerically faithful on this stack. The other team's TP2-specific
+   blowup does not reproduce on CUDA (their issue is elsewhere: NPU kernels, their TP
+   impl, or their engine pair).
+2. The mismatch (pearson ~0.75-0.81) is inherent to the ENGINE PAIR on this box:
+   vllm-0.18 bf16 (FLASH_ATTN backend) rollout vs FSDP training engine forced to
+   **sdpa** + `use_remove_padding=False` + pure-torch pad fallback (no flash_attn
+   wheel for sm_121). Candidate contributors: attention-kernel numerics (sdpa vs FA2),
+   bf16 accumulation-order differences, tiny-model (0.6B) amplification.
+3. Extreme disagreements (probs_diff_max≈1, is_min≈2e-9) concentrate in isolated
+   tokens — same *shape* as the other team's token-271 spike, far smaller magnitude.
+4. Practical: token-IS truncation @2.0 already yields ESS 0.90-0.94 → verl's
+   rollout-correction is a workable mitigation as-is; for the drkernel config
+   (`use_rollout_log_probs=True`) either enable rollout_correction or align the
+   engine pair before trusting gradients.
+
+### ROOT CAUSE FOUND — token-level localization (final)
+
+Per-token dump (`VERL_LOGPROB_DIAG_DUMP` hook in `verl/utils/debug/metrics.py`,
+analyzer `analyze_logprob_diag.py`), one step, TP=1, 64 seqs x 768 tokens:
+
+- Extreme disagreements (prob diff>0.5): **0% in deciles 0-7** of every sequence;
+  16.6% in decile 8, **62% in decile 9**. Onset varies per sequence (~630-660) →
+  content-dependent, not positional. 40/64 last tokens extreme, 0/64 first tokens.
+- Offending tokens: '0', ' ', '1', ',', '.', ' the' — **degenerate numeric repetition
+  loops** in sequences that hit the 768 cap (48/64 capped; clip_ratio 0.47).
+- Direction: rollout-confident/actor-not on 3650/3655 extreme tokens.
+
+**Pearson on healthy tokens: 0.9993; fraction_low: 0.00%.** The vllm-0.18 / FSDP
+engine pair is numerically excellent everywhere except chaotic repetition tails,
+where peaked distributions amplify any engine difference into full flips.
+
+Final attribution table:
+| hypothesis | verdict |
+|---|---|
+| TP=2 tensor-parallel numerics | innocent (identical to TP=1) |
+| attention kernel (sdpa vs eager) | minor (~+0.02 pearson) |
+| training-side bf16 forward | innocent (fp32 changed nothing) |
+| sampling scaling (temp/top-p) | innocent (1.0/1.0/-1) |
+| **degenerate truncated-tail tokens** | **ROOT CAUSE (100% of extremes)** |
+
+Practical guidance for vllm-0.18 RL on this stack:
+1. The engine pair needs NO numeric hardening (no fp32-logprob, no kernel work).
+2. Handle degenerate tails with standard RL hygiene: overlong filtering/penalty,
+   adequate max_response_length for the task, and/or rollout-correction RS/veto
+   (token-IS trunc@2 gives ESS 0.90+; RS would mask exactly these tails).
+3. Reinterpretation of the other team's ~97% RS masking: on our stack that magnitude
+   would require nearly all tokens degenerate — their failure (token-271 spike at
+   TP2, early positions) is a different phenomenon; ours shows ZERO early-position
+   anomalies.
+
+---
+
+## RL-2 — fully-async separation (the drkernel production deployment shape) — PASS
+
+`recipe.drkernel.main` is built on `verl.experimental.fully_async_policy`; we validated
+that core end-to-end on vLLM 0.18 with the minimal proxy (trloo + gsm8k + Qwen3-0.6B),
+scaled to the 2-Spark cluster: **TRAINER pool = 1 GPU (head), ROLLOUTER pool = 1 GPU
+(bruce) — fully separated, cross-node**. Launcher: `run_trloo_fullyasync_1p1.sh`.
+
+Result: 3/3 training steps (43/34/31 s/it), rc=0. **NCCL checkpoint-engine weight
+sync working**: `_fit_update_weights timing_s/param_sync ≈ 2.0–2.3 s`, param_version
+incrementing every step (`trigger_parameter_sync_step=1`) — this is the trainer→rollouter
+weight push the production deployment uses. Non-degenerate training (score 0.03→0.25,
+grad_norm 0.35→0.94). Rollouter streaming via FullyAsyncAgentLoopWorkers on bruce.
+
+Breakages fixed en route (all environment, no verl code changes):
+1. **cupy missing → "Checkpoint engine nccl not registered"** (conditional import
+   silently skips). Fix: `cupy-cuda13x` 14.1.1 (aarch64 manylinux wheel exists) on BOTH
+   nodes.
+2. **`naive` checkpoint backend is incompatible with fully-async** (Ray async actor
+   requires coroutine methods; naive has none). nccl backend is effectively required.
+3. **torchdata missing on bruce** (env drift after the mirror) → Ray's misleading
+   "actor does not have any coroutine functions" on FullyAsyncRollouter — actually an
+   ImportError during class deserialization on the worker node. Lesson: after
+   incremental pip installs on the head, re-diff site-packages dist-infos vs bruce.
+
+Remaining delta to the FULL drkernel form (→ RL-4): `recipe.drkernel.main` swaps in
+KernelAgentLoop + KernelAsyncRewardManager + KernelGYM server + kernel dataset + 8B
+model. The architecture underneath is what was just validated.

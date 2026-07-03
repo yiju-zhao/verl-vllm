@@ -16,6 +16,7 @@ Contain small torch utilities
 """
 
 import math
+import os
 from contextlib import contextmanager
 from typing import Optional
 
@@ -141,7 +142,24 @@ def logprobs_from_logits_torch_npu(logits: torch.Tensor, labels: torch.Tensor) -
     """
     batch_dim = logits.shape[:-1]
     logits = logits.reshape(-1, logits.shape[-1])
-    loss, _, _, _ = torch_npu.npu_cross_entropy_loss(logits, labels.reshape(-1), reduction="none")
+    labels = labels.reshape(-1)
+    # torch_npu's npu_cross_entropy_loss computes its logsumexp in the input dtype; a
+    # bf16 logsumexp over a ~150k vocab is biased high, which biases the recomputed
+    # logprob low vs the fp32 rollout logprob (~0.06 nat one-sided on torch_npu 2.10 —
+    # enough to push rollout-correction RS masking to ~96%). Upcast to fp32 to match
+    # the rollout path, chunked over tokens so the transient fp32 copy stays small.
+    # Default on; set DKV_FP32_LOGPROB=0 to A/B.
+    # (Fix originates from the Sawyer117/verl drkernel-port TP2/token-271 post-mortem.)
+    if os.environ.get("DKV_FP32_LOGPROB", "1") != "0" and logits.dtype != torch.float32:
+        chunk = int(os.environ.get("DKV_FP32_LOGPROB_CHUNK", "2048"))
+        out = []
+        for i in range(0, logits.shape[0], chunk):
+            loss, _, _, _ = torch_npu.npu_cross_entropy_loss(
+                logits[i : i + chunk].float(), labels[i : i + chunk], reduction="none"
+            )
+            out.append(-loss)
+        return torch.cat(out).view(*batch_dim)
+    loss, _, _, _ = torch_npu.npu_cross_entropy_loss(logits, labels, reduction="none")
     return -loss.view(*batch_dim)
 
 
