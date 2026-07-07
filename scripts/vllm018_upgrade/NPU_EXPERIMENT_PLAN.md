@@ -101,25 +101,22 @@ OOV mask 的 TP 分片修复(全局词表坐标)。
 
 ## Phase 3 — TP2 矩阵:Austin 判定实验(核心,~1 小时,2 NPU)
 
-- [ ] **3a. TP2 裸跑 + token 级 dump**:
+> ⚠️ **单节点 TP2 必须把 worker group 撑到 2 卡**:base launcher 硬编码
+> `trainer.n_gpus_per_node=1`(world size 1),TP2 rollout 要 world≥2,否则 verl 直接
+> 报 `world_size < tensor_model_parallel_size`。CUDA 侧靠 `nnodes=2` 拿到 world 2;
+> 单机 NPU 必须追加 `trainer.n_gpus_per_node=2`(Hydra 后者覆盖前者,已验证)。
+> Austin checkout 未打 24b1aa4 前,命令前缀再加 `TORCHDYNAMO_DISABLE=1`。
+
+- [ ] **3a. TP2 裸跑 + token 级 dump**(`0,1` 换成你实际空闲的两张卡):
   ```bash
-  STEPS=2 PY=python VERL_LOGPROB_DIAG_DUMP=/tmp/lp_diag ASCEND_RT_VISIBLE_DEVICES=0,1 \
-    bash scripts/vllm018_upgrade/rl/npu/run_trloo_npu.sh \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
-    "+ray_kwargs.ray_init.runtime_env.env_vars.VERL_LOGPROB_DIAG_DUMP=/tmp/lp_diag" \
-    2>&1 | tee /tmp/npu_tp2.log
+  STEPS=2 PY=python TORCHDYNAMO_DISABLE=1 VERL_LOGPROB_DIAG_DUMP=/tmp/lp_diag ASCEND_RT_VISIBLE_DEVICES=0,1 bash scripts/vllm018_upgrade/rl/npu/run_trloo_npu.sh actor_rollout_ref.model.path=/home/canada_group_folder/ckpt/Qwen3-0.6B actor_rollout_ref.rollout.tensor_model_parallel_size=2 trainer.n_gpus_per_node=2 "+ray_kwargs.ray_init.runtime_env.env_vars.VERL_LOGPROB_DIAG_DUMP=/tmp/lp_diag" 2>&1 | tee /tmp/npu_tp2.log
   python scripts/vllm018_upgrade/rl/analyze_logprob_diag.py "/tmp/lp_diag/*.pt" | tee /tmp/npu_tp2_analysis.txt
   ```
   看 analyzer 的:十分位直方图(早期位置有无异常)、top offending tokens(有无 "\n\n"/271 类)、
   首 token 异常数。
 - [ ] **3b. TP2 + NZ=0(决定性实验)**:
   ```bash
-  STEPS=2 PY=python VLLM_ASCEND_ENABLE_NZ=0 VERL_LOGPROB_DIAG_DUMP=/tmp/lp_diag_nz0 ASCEND_RT_VISIBLE_DEVICES=0,1 \
-    bash scripts/vllm018_upgrade/rl/npu/run_trloo_npu.sh \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
-    "+ray_kwargs.ray_init.runtime_env.env_vars.VERL_LOGPROB_DIAG_DUMP=/tmp/lp_diag_nz0" \
-    "+ray_kwargs.ray_init.runtime_env.env_vars.VLLM_ASCEND_ENABLE_NZ=0" \
-    2>&1 | tee /tmp/npu_tp2_nz0.log
+  STEPS=2 PY=python TORCHDYNAMO_DISABLE=1 VLLM_ASCEND_ENABLE_NZ=0 VERL_LOGPROB_DIAG_DUMP=/tmp/lp_diag_nz0 ASCEND_RT_VISIBLE_DEVICES=0,1 bash scripts/vllm018_upgrade/rl/npu/run_trloo_npu.sh actor_rollout_ref.model.path=/home/canada_group_folder/ckpt/Qwen3-0.6B actor_rollout_ref.rollout.tensor_model_parallel_size=2 trainer.n_gpus_per_node=2 "+ray_kwargs.ray_init.runtime_env.env_vars.VERL_LOGPROB_DIAG_DUMP=/tmp/lp_diag_nz0" "+ray_kwargs.ray_init.runtime_env.env_vars.VLLM_ASCEND_ENABLE_NZ=0" 2>&1 | tee /tmp/npu_tp2_nz0.log
   python scripts/vllm018_upgrade/rl/analyze_logprob_diag.py "/tmp/lp_diag_nz0/*.pt"
   ```
 - [ ] **判定矩阵**:
