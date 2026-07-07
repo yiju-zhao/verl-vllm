@@ -82,7 +82,9 @@ OOV mask 的 TP 分片修复(全局词表坐标)。
 
 ## Phase 2 — TP1 基线 + Gap A 度量(~30 分钟,1 NPU)
 
-- [ ] **2a. TP1 + 诊断**(fp32 logprob 默认开):
+- [x] **2a. TP1 + 诊断**(fp32 logprob 默认开)— **PASS 2026-07-07**:pearson 0.9991、
+  rollout_is_mean 0.9999、fraction_low 0.0、score/mean→0.25。engine 对如 CUDA 般干净。
+  (先修:torch.compile 在 CANN9 上编译失败,已默认 `TORCHDYNAMO_DISABLE=1`,见下方运维坑。)
   ```bash
   STEPS=5 PY=python bash scripts/vllm018_upgrade/rl/npu/run_trloo_npu.sh 2>&1 | tee /tmp/npu_tp1.log
   grep -oE "pearson_corr[^ ]+|rollout_is_mean[^ ]+|rollout_is_ratio_fraction_low[^ ]+" /tmp/npu_tp1.log | tail -6

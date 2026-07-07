@@ -396,3 +396,28 @@ Breakages fixed en route (all environment, no verl code changes):
 Remaining delta to the FULL drkernel form (→ RL-4): `recipe.drkernel.main` swaps in
 KernelAgentLoop + KernelAsyncRewardManager + KernelGYM server + kernel dataset + 8B
 model. The architecture underneath is what was just validated.
+
+---
+
+## NPU Phase 2a — TP1 baseline + diagnostics (Austin 8×910B, 2026-07-07) — PASS
+
+Stack: `dr-kernel-npu-018` env, CANN 9.0.0.0512, torch_npu 2.9.0, vllm/vllm-ascend 0.18.0,
+Qwen3-0.6B @ `/home/canada_group_folder/ckpt/Qwen3-0.6B`. Launcher `rl/npu/run_trloo_npu.sh`,
+TP1, single NPU, colocated `verl.trainer.main_ppo`, STEPS=5.
+
+**Blocker fixed first — torch.compile is unusable on this box.** The entropy path
+(`compute_entropy_from_logits`, gated on `use_torch_compile`) is `torch.compile`'d; it routes
+through torch._inductor → the Ascend Triton backend, which fails to build `npu_utils.cpp`:
+it references `RT_LIMIT_TYPE_SIMT_WARP_STACK_SIZE`, **renamed to `*_SIMT_DVG_WARP_STACK_SIZE`
+in CANN 9.0.0** → `MLIRCompilationError`/`NoTritonConfigsError`, surfaced by Ray as the
+misleading `cannot pickle 'frame' object`. This is a triton-ascend↔CANN header version skew,
+NOT verl and NOT a numerical issue. Fix: `TORCHDYNAMO_DISABLE=1` (now defaulted in both NPU
+launchers) → all torch.compile → eager, numerically lossless (rollout is already enforce_eager).
+Commit 24b1aa4.
+
+**Result (numerically decisive):** pearson_corr **0.9991**, rollout_is_mean **0.9999**,
+rollout_is_ratio_fraction_low **0.0**, score/mean up to 0.25 (max 1.0) — non-degenerate.
+The engine pair on this NPU stack is as clean as CUDA (0.9993) and ~Austin's TP1 (0.9997).
+rollout_is_mean≈1.0 with fp32-logprob ON already signals **no Gap-A bf16 bias on torch_npu 2.9**
+(the ×0.94 drift was a torch_npu 2.10 artifact) — 2b confirms by A/B'ing DKV_FP32_LOGPROB=0.
+TP1 needs NO numeric hardening on this stack.
