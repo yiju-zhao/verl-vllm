@@ -119,16 +119,21 @@ OOV mask 的 TP 分片修复(全局词表坐标)。
   **CLEAN 2026-07-07(cards 2,3)**:pearson 0.9940、rollout_is_mean 0.9984、veto 0/0。45890
   token 里仅 4 个 extreme(0.01%),token id 11/13/438/2704 各 1 次(**非固定 token,非 271**)。
   → Austin 的 271 在本栈**不复现**;其问题限于 0.20/torch_npu 2.10。
-- [ ] **3b. TP2 + NZ=0(决定性实验)**:
+- [x] **3b. TP2 + NZ=0(决定性实验)— 2026-07-07(cards 2,3)**:pearson 0.9955、
+  rollout_is_mean 0.9982、veto 0/0,与 3a 同一干净带。48/46102 extreme(0.10%,散布全十分位、
+  无固定 token,top id=11 逗号)。**NZ 开关都不复现 271;extreme 数 4↔48 是不同生成序列的抽样
+  方差(未固定 seed),非 NZ 效应。→ NZ 不是驱动因素。**
   ```bash
   STEPS=2 PY=python TORCHDYNAMO_DISABLE=1 VLLM_ASCEND_ENABLE_NZ=0 VERL_LOGPROB_DIAG_DUMP=/tmp/lp_diag_nz0 ASCEND_RT_VISIBLE_DEVICES=0,1 bash scripts/vllm018_upgrade/rl/npu/run_trloo_npu.sh actor_rollout_ref.model.path=/home/canada_group_folder/ckpt/Qwen3-0.6B actor_rollout_ref.rollout.tensor_model_parallel_size=2 trainer.n_gpus_per_node=2 "+ray_kwargs.ray_init.runtime_env.env_vars.VERL_LOGPROB_DIAG_DUMP=/tmp/lp_diag_nz0" "+ray_kwargs.ray_init.runtime_env.env_vars.VLLM_ASCEND_ENABLE_NZ='0'" 2>&1 | tee /tmp/npu_tp2_nz0.log
   python scripts/vllm018_upgrade/rl/analyze_logprob_diag.py "/tmp/lp_diag_nz0/*.pt"
   ```
 - [ ] **判定矩阵**:
 
+  **→ 命中 ROW 1(3a 干净)。最终判定见下。**
+
   | 观测 | 结论 |
   |---|---|
-  | 3a 干净(pearson≈TP1,无早期异常) | 你们的栈没有 271 —— Austin 的问题在其 0.20/torch_npu 2.10 组合或其分支,升级即解 |
+  | ✅ **3a 干净(pearson≈TP1,无早期异常)← 本次结果** | 你们的栈没有 271 —— Austin 的问题在其 0.20/torch_npu 2.10 组合或其分支,升级即解 |
   | 3a 脏 + **3b 干净** | **NZ matmul 批变性 = 根因坐实**;生产方案 = TP2 + `VLLM_ASCEND_ENABLE_NZ=0`,顺带记录吞吐差 |
   | 3a 脏 + 3b 仍脏 | 批变性在 attention/HCCL 层 → 按 Austin 病历 §8 走选择性 BI(只换 matmul、跳过 attention 覆盖,并保留 npu 采样算子避开 triton 崩溃) |
 

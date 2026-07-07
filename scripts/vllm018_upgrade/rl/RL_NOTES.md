@@ -450,4 +450,28 @@ distribution, and none is 271. veto fractions 0.0 → nothing catastrophic.
 Our CUDA control already showed TP1≡TP2 (vllm core/verl integration exonerated); this NPU TP2
 run confirms the 0.18 Ascend kernel path is clean too. Austin's blowup is confined to their
 0.20 / torch_npu 2.10 stack (or their branch) — upgrading to this 0.18 combo is the fix.
-[3b NZ=0 pending as confirmation the matrix is clean with NZ on OR off.]
+
+## NPU Phase 3b — TP2 + VLLM_ASCEND_ENABLE_NZ=0 (STEPS=2, cards 2,3) — CLEAN, NZ is not a driver
+
+Same TP2 config with NZ format disabled. Metrics: pearson **0.9955**, rollout_is_mean **0.9982**,
+`rollout_veto_seq_fraction`=0.0, `rollout_veto_catastrophic_token_fraction`=0.0 — same clean
+band as 3a. analyze_logprob_diag over 46,102 tokens: 48 extreme (0.10%), 175 low-ratio (0.38%),
+25/64 seqs, spread across ALL deciles (no early-position or fixed-position spike), top id=11 ("," )
+×7 then common punctuation/space scatter — no 271, no structural-boundary token.
+
+**Honest comparison caveat:** 3a and 3b used different generated sequences (no shared seed across
+the NZ toggle), so the extreme-token COUNTS (4 vs 48) are sampling variance, NOT an NZ effect.
+The stable/comparable signals match: pearson ~0.994–0.996, rollout_is_mean ~0.998, veto 0.0% in
+both. NZ off did not clean anything (slightly more tail scatter if anything); NZ on did not blow
+up. **Conclusion: NZ batch-invariance is not a driver on this stack either way.**
+
+### PHASE 3 VERDICT (Austin token-271) — decision-matrix ROW 1: "3a clean"
+
+The token-271 blowup does **NOT reproduce** on `vllm-ascend 0.18 + torch_npu 2.9 + CANN 9.0.0`.
+- 3a bare TP2: pearson 0.994, 4/45890 extreme, veto 0%, no fixed-token spike.
+- 3b TP2 + NZ=0: pearson 0.9955, veto 0%, NZ toggle changes nothing categorical.
+- CUDA control (RL-3): TP1≡TP2 identical → vllm core + verl integration exonerated.
+Austin's failure (single token 271="\n\n" recurring → 97% seq masking, seq-level RS band
+[0.997,1.003]) is confined to their 0.20 / torch_npu 2.10 stack (or their branch). **Fix =
+upgrade to this 0.18 combo; no VLLM_ASCEND_ENABLE_NZ=0 workaround required.** DKV_FP32_LOGPROB
+and the OOV-mask TP fix remain as portable insurance (no-ops here, load-bearing on 2.10).
