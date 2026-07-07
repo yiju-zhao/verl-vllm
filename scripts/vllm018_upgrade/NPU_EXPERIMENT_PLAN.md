@@ -106,6 +106,8 @@ OOV mask 的 TP 分片修复(全局词表坐标)。
 > 报 `world_size < tensor_model_parallel_size`。CUDA 侧靠 `nnodes=2` 拿到 world 2;
 > 单机 NPU 必须追加 `trainer.n_gpus_per_node=2`(Hydra 后者覆盖前者,已验证)。
 > Austin checkout 未打 24b1aa4 前,命令前缀再加 `TORCHDYNAMO_DISABLE=1`。
+> ⚠️ 经 `+ray_kwargs...env_vars` 传数值型 env(如 NZ)**必须加引号** `='0'`,否则 Hydra 解析成
+> int 0,Ray 的 `env_vars` 只收 `Dict[str,str]` → `TypeError: value 0 is of type int`。
 
 - [ ] **3a. TP2 裸跑 + token 级 dump**(`0,1` 换成你实际空闲的两张卡):
   ```bash
@@ -119,7 +121,7 @@ OOV mask 的 TP 分片修复(全局词表坐标)。
   → Austin 的 271 在本栈**不复现**;其问题限于 0.20/torch_npu 2.10。
 - [ ] **3b. TP2 + NZ=0(决定性实验)**:
   ```bash
-  STEPS=2 PY=python TORCHDYNAMO_DISABLE=1 VLLM_ASCEND_ENABLE_NZ=0 VERL_LOGPROB_DIAG_DUMP=/tmp/lp_diag_nz0 ASCEND_RT_VISIBLE_DEVICES=0,1 bash scripts/vllm018_upgrade/rl/npu/run_trloo_npu.sh actor_rollout_ref.model.path=/home/canada_group_folder/ckpt/Qwen3-0.6B actor_rollout_ref.rollout.tensor_model_parallel_size=2 trainer.n_gpus_per_node=2 "+ray_kwargs.ray_init.runtime_env.env_vars.VERL_LOGPROB_DIAG_DUMP=/tmp/lp_diag_nz0" "+ray_kwargs.ray_init.runtime_env.env_vars.VLLM_ASCEND_ENABLE_NZ=0" 2>&1 | tee /tmp/npu_tp2_nz0.log
+  STEPS=2 PY=python TORCHDYNAMO_DISABLE=1 VLLM_ASCEND_ENABLE_NZ=0 VERL_LOGPROB_DIAG_DUMP=/tmp/lp_diag_nz0 ASCEND_RT_VISIBLE_DEVICES=0,1 bash scripts/vllm018_upgrade/rl/npu/run_trloo_npu.sh actor_rollout_ref.model.path=/home/canada_group_folder/ckpt/Qwen3-0.6B actor_rollout_ref.rollout.tensor_model_parallel_size=2 trainer.n_gpus_per_node=2 "+ray_kwargs.ray_init.runtime_env.env_vars.VERL_LOGPROB_DIAG_DUMP=/tmp/lp_diag_nz0" "+ray_kwargs.ray_init.runtime_env.env_vars.VLLM_ASCEND_ENABLE_NZ='0'" 2>&1 | tee /tmp/npu_tp2_nz0.log
   python scripts/vllm018_upgrade/rl/analyze_logprob_diag.py "/tmp/lp_diag_nz0/*.pt"
   ```
 - [ ] **判定矩阵**:
