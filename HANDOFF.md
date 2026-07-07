@@ -10,8 +10,9 @@
 
 1. ✅ vLLM 0.18 CUDA 升级(编译/推理/TP=2)
 2. ✅ CUDA RL 全通路(colocated 单卡 + 双机 TP=2 + fully-async 生产形态)+ 数值验证
-3. 🔄 **B2:NPU 实机验证(进行中,当前在 Phase 2)** ← 现在的主线
-4. ⏳ RL-4:真实 drkernel(8B + KernelGYM + kernel 数据集)——Austin 机器上物料齐备
+3. ✅ **B2:NPU 实机验证完成(Phase 0-4 全 PASS,2026-07-07)** —— Austin token-271
+   判定已出:**不复现**(见下方"NPU 结论")。
+4. ⏳ RL-4:真实 drkernel(8B + KernelGYM + kernel 数据集)——Austin 机器上物料齐备 ← 现在的主线
 
 ## 二、已完成(全部入库并推送)
 
@@ -79,10 +80,25 @@
 - ⚠️ 曾试过的 docker(16 NPU 那个)CANN=8.5.2 不满足 vllm-ascend 0.18 的
   **CANN==9.0.0 硬性要求**,已弃用,改借 Austin 的 host env。
 
-### 进度(NPU_EXPERIMENT_PLAN.md 的梯子)
+### NPU 结论(B2 全部 PASS,2026-07-07)——先看这段
+- **Phase 0-4 全绿**:环境 ✅ / 推理 smoke ✅ / TP1 RL pearson 0.9991 ✅ /
+  Gap-A A/B(torch_npu 2.9 无偏差)✅ / TP2 矩阵 ✅ / fully-async HCCL 权重推送 ✅。
+- **Austin token-271 判定 = 不复现**:TP2 裸跑 pearson 0.994、veto 0%、45890 token 仅 4 个
+  extreme(非固定 token,无 271);NZ 开/关都干净(NZ 非驱动因素)。叠加 CUDA TP1≡TP2 对照
+  → vllm core + verl 集成 + Ascend 0.18 kernel 路径全部洗清。Austin 的翻车限于其
+  **0.20 / torch_npu 2.10** 组合(或其分支),**升级到本 0.18 组合即解,无需 NZ=0**。
+- **关键环境修复**:torch.compile 在 CANN9 上编译失败 → 启动器默认 `TORCHDYNAMO_DISABLE=1`
+  (triton-ascend 引用被 CANN9 改名的 `RT_LIMIT_TYPE_SIMT_WARP_STACK_SIZE`)。
+- **NPU 运维两坑**:① 残留 `VLLMWorker_TP` 进程 `ray stop` 杀不掉、占 ~30GB/卡 → 下轮 OOM,
+  按 pid 清(共享机勿 blanket-pkill);② 0.6B 用 `gpu_memory_utilization=0.3` 足够。
+- 全部记录在 `rl/RL_NOTES.md`(NPU Phase 2a/2b/3a/3b/4 + B2 COMPLETE 段)与
+  `NPU_EXPERIMENT_PLAN.md`(勾选 + 判定矩阵命中 ROW1)。
+- ⚠️ 本轮 7+ commits 全在本地 main **未推送**(auto-mode 禁止直推 main;用户以 yiju-zhao 推)。
+
+### 进度(NPU_EXPERIMENT_PLAN.md 的梯子)——历史命令留档
 - ✅ Phase 0 环境(借用)  ✅ Phase 1 推理 smoke:**SMOKE PASS**(npu_vllm_patch
   0.18 分支 + rotary 审计点真机验证通过)
-- 🔄 **Phase 2(下一步,命令已给用户)**:
+- ✅ **Phase 2(已完成)**:
   - 2a: `STEPS=5 ASCEND_RT_VISIBLE_DEVICES=0 PY=python bash scripts/vllm018_upgrade/rl/npu/run_trloo_npu.sh actor_rollout_ref.model.path=/home/canada_group_folder/ckpt/Qwen3-0.6B 2>&1 | tee /tmp/npu_tp1.log`
   - 判定:5 步 rc=0,pearson ≥0.99(基线 CUDA 0.9993 / Austin TP1 0.9997),score 非零
   - 2b(Gap-A A/B): 同命令前加 `STEPS=2 DKV_FP32_LOGPROB=0`,对比 `rollout_is_mean`

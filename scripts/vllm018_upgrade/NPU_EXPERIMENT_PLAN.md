@@ -142,12 +142,19 @@ OOV mask 的 TP 分片修复(全局词表坐标)。
 
 ## Phase 4 — fully-async 生产形态(~30 分钟,2 NPU)
 
-- [ ] ```bash
-  PY=python bash scripts/vllm018_upgrade/rl/npu/run_trloo_fullyasync_npu.sh 2>&1 | tee /tmp/npu_async.log
-  grep -E "param_sync|[0-9]/3 \[" /tmp/npu_async.log | tail -5
+- [x] **PASS 2026-07-07(cards 4,5,gpu_mem_util=0.3)**:
+  ```bash
+  PY=python TORCHDYNAMO_DISABLE=1 TOTAL_ROLLOUT_STEPS=8 ASCEND_RT_VISIBLE_DEVICES=4,5 bash scripts/vllm018_upgrade/rl/npu/run_trloo_fullyasync_npu.sh actor_rollout_ref.model.path=/home/canada_group_folder/ckpt/Qwen3-0.6B actor_rollout_ref.rollout.gpu_memory_utilization=0.3 2>&1 | tee /tmp/npu_async.log
+  grep -E "param_sync|param_version|[0-9]+/[0-9]+ \[" /tmp/npu_async.log | tail -12
   ```
-  期望:Rollouter/Trainer 分池在两张 NPU、`_fit_update_weights timing_s/param_sync` 每步出现
-  (HCCL 推送;CUDA 参照 ~2s/步)、3/3 步 rc=0。
+  结果:Rollouter(pid 46871)/Trainer(pid 45734)分池在两张 NPU(两个独立 Ray resource pool,
+  Ray 自动错开物理卡)、`_fit_update_weights timing_s/param_sync` 3.51s(v0)→2.57s(v1)、
+  `param_version` 0→1 递增(HCCL 权重推送成功;CUDA 参照 ~2s/步)、干净退出。**NPU 无需 cupy**
+  (checkpoint 后端 "nccl" 解析为 HCCL 实现)。
+  - ⚠️ 坑1:上一轮 TP2 的 `VLLMWorker_TP` 进程会残留占 ~30GB/卡且 `ray stop` 杀不掉 → 下一轮
+    rollout 报 `Free memory 30.46/60.96 < desired 0.5`。`npu-smi info` 查、按 pid 杀自己的
+    `VLLMWorker*`(共享机勿 blanket-pkill,卡 1 有别人的 `VLLMEngineCor`),或换干净卡。
+  - ⚠️ 坑2:0.6B 用 `gpu_memory_utilization=0.5` 是浪费(要 ~30GB KV),降到 0.3(~18GB)即可。
 
 ## 记录与回传
 

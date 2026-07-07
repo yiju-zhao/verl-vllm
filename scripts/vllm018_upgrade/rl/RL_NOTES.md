@@ -475,3 +475,33 @@ Austin's failure (single token 271="\n\n" recurring → 97% seq masking, seq-lev
 [0.997,1.003]) is confined to their 0.20 / torch_npu 2.10 stack (or their branch). **Fix =
 upgrade to this 0.18 combo; no VLLM_ASCEND_ENABLE_NZ=0 workaround required.** DKV_FP32_LOGPROB
 and the OOV-mask TP fix remain as portable insurance (no-ops here, load-bearing on 2.10).
+
+## NPU Phase 4 — fully-async separation (the drkernel production shape) on NPU — PASS
+
+`verl.experimental.fully_async_policy` with TRAINER pool = 1 NPU + ROLLOUTER pool = 1 NPU on a
+single node (cards 4,5). Launcher `rl/npu/run_trloo_fullyasync_npu.sh`, TOTAL_ROLLOUT_STEPS=8,
+gpu_memory_utilization=0.3. Rollouter (pid 46871) and Trainer (pid 45734) landed on separate
+cards — the two pools are distinct Ray resource pools (`create_resource_pool_manager` builds one
+per role), so Ray places them on disjoint NPUs; no collision by design. Rollouter streamed 8/8
+samples via FullyAsyncAgentLoopWorkers → trainer assembled batch → 1 training step. **HCCL
+checkpoint-engine weight push working**: `_fit_update_weights timing_s/param_sync` 3.51s (v0)
+then 2.57s (v1), `current_param_version` incrementing 0→1 — the trainer→rollouter weight sync the
+production deployment uses (CUDA ref ~2s; NPU ~2.5–3.5s in band). Clean shutdown. **No cupy
+needed on NPU** (checkpoint backend name "nccl" resolves to the HCCL impl), confirming the note
+from the launcher authoring.
+
+Two environment gotchas hit and captured:
+1. **Leaked vLLM TP workers survive `ray stop`.** After the 3b TP2 run, two `VLLMWorker_TP`
+   procs (pids 41700xx) held ~30 GiB each on cards 2,3; the next run's rollout engine then failed
+   `Free memory 30.46/60.96 GiB < desired 0.5`. `ray stop --force` does NOT reap them. Sweep:
+   `npu-smi info` → kill the stale `VLLMWorker*` pids on YOUR cards by pid (do NOT blanket-pkill
+   on the shared box — card 1 runs another user's `VLLMEngineCor`). Then use clean cards.
+2. **gpu_memory_utilization=0.5 is wild overkill for 0.6B** (wants ~30 GiB KV on a 64 GiB card).
+   Drop to 0.3 (~18 GiB) — fits even a partially-used card and is a better shared-box citizen.
+
+### B2 NPU RUNTIME VALIDATION COMPLETE (2026-07-07)
+Phase 0 env ✅ · Phase 1 inference smoke ✅ · Phase 2a TP1 pearson 0.9991 ✅ · Phase 2b no Gap-A
+on torch_npu 2.9 ✅ · Phase 3 TP2 matrix → token-271 does NOT reproduce, NZ not a driver ✅ ·
+Phase 4 fully-async HCCL weight push ✅. verl + vllm 0.18 RL is validated end-to-end on
+Ascend 910B (torch_npu 2.9 + CANN 9.0.0 + vllm-ascend 0.18). Remaining: RL-4 real drkernel
+(8B + KernelGYM + kernel dataset, assets staged on this box).
