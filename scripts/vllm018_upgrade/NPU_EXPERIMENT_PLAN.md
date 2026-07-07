@@ -95,6 +95,8 @@ OOV mask 的 TP 分片修复(全局词表坐标)。
   STEPS=2 DKV_FP32_LOGPROB=0 PY=python bash scripts/vllm018_upgrade/rl/npu/run_trloo_npu.sh 2>&1 | tee /tmp/npu_tp1_bf16.log
   ```
   判读:2b 相对 2a 的 `rollout_is_mean` 偏移即 Gap A(torch_npu 2.10 上 ≈×0.94;2.9 上应≈1)。
+  **PASS 2026-07-07**:2b rollout_is_mean 1.00006 vs 2a 0.9999(Δ≈7e-5,统计零)→ **torch_npu 2.9
+  无 Gap-A**;DKV_FP32_LOGPROB 在这台机器是无害的空保险(2.10 才 ×0.94)。保留默认开。
 - [ ] 若 attention/padding 报错:加 `ATTN_FALLBACK=1` 重试(eager + no-remove-padding,CUDA 验证过)。
 
 ## Phase 3 — TP2 矩阵:Austin 判定实验(核心,~1 小时,2 NPU)

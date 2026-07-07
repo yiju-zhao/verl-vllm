@@ -421,3 +421,15 @@ The engine pair on this NPU stack is as clean as CUDA (0.9993) and ~Austin's TP1
 rollout_is_mean≈1.0 with fp32-logprob ON already signals **no Gap-A bf16 bias on torch_npu 2.9**
 (the ×0.94 drift was a torch_npu 2.10 artifact) — 2b confirms by A/B'ing DKV_FP32_LOGPROB=0.
 TP1 needs NO numeric hardening on this stack.
+
+## NPU Phase 2b — Gap-A A/B (DKV_FP32_LOGPROB=0, STEPS=2) — no Gap-A on torch_npu 2.9
+
+Same launcher, fp32 logsumexp upcast **OFF**. Result: rollout_is_mean **1.00006** (vs 2a's
+0.9999 with upcast ON — Δ≈7e-5, statistically zero), pearson 0.9992, fraction_low 0.0.
+Extra corroboration from the full `rollout_corr` dump: seq-level IS in [0.9962, 1.0029],
+`rollout_veto_seq_fraction`=0.0, `rollout_veto_catastrophic_token_fraction`=0.0,
+`chi2_token`=0.0015, ESS 0.9986. **Conclusion: torch_npu 2.9 bf16 logsumexp has no
+measurable bias; the DKV_FP32_LOGPROB upcast is a harmless no-op safety net on this stack**
+(Austin's ×0.94 Gap-A was a torch_npu 2.10 artifact). The seq-level RS band that produced
+their 97% masking is dry here (max_deviation 0.0038). Keep DKV_FP32_LOGPROB=1 default (cheap
+insurance, portable to 2.10 boxes); it is not load-bearing on 2.9.
