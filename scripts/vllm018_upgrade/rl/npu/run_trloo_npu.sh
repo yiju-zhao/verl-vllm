@@ -18,6 +18,11 @@ PY="${PY:-python3}"
 cd "$(dirname "$0")/../../../.."   # port root
 export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0}"
 export VLLM_WORKER_MULTIPROC_METHOD=spawn RAY_USAGE_STATS_ENABLED=0
+# torch.compile is unusable on this box: triton-ascend emits RT_LIMIT_TYPE_SIMT_WARP_STACK_SIZE
+# which CANN 9.0.0 renamed to *_DVG_*, so the inductor→triton entropy kernel fails to build.
+# Disable dynamo → all torch.compile falls back to eager (fine numerically; enforce_eager rollout
+# is unaffected). Single-node colocated Ray, so this export reaches the workers. Override to 0 to A/B.
+export TORCHDYNAMO_DISABLE="${TORCHDYNAMO_DISABLE:-1}"
 ray stop --force >/dev/null 2>&1; rm -rf /tmp/ray 2>/dev/null
 train=$HOME/data/gsm8k/train.parquet ; test=$HOME/data/gsm8k/test.parquet
 STEPS="${STEPS:-5}"

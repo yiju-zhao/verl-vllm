@@ -152,3 +152,10 @@ OOV mask 的 TP 分片修复(全局词表坐标)。
 - 大批量 validation + 首次 logprob 路径可能超 RPC 超时:实验脚本已跳过 val;需要 val 时
   设 `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200`。
 - 多次实验之间共享卡:确保上一轮(含别人的 0.20 栈)已停干净再开跑。
+- **torch.compile 在这台机器上不可用**(2026-07-07 Phase 2a 踩到):entropy 路径
+  (`compute_entropy_from_logits`)走 torch._inductor → triton-ascend,后者引用
+  `RT_LIMIT_TYPE_SIMT_WARP_STACK_SIZE`,而 CANN 9.0.0 已把它改名为 `*_SIMT_DVG_WARP_STACK_SIZE`
+  → `MLIRCompilationError` / `NoTritonConfigsError`,Ray 里表现为 "cannot pickle 'frame' object"。
+  修复:launcher 已默认 `export TORCHDYNAMO_DISABLE=1`(dynamo 关闭 → 全部 torch.compile 退回
+  eager,数值无损,rollout 本就 enforce_eager)。要 A/B 编译时传 `TORCHDYNAMO_DISABLE=0`。
+  这是 triton-ascend 与 CANN 头文件的版本错配,非 verl 问题。

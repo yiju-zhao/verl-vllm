@@ -11,6 +11,10 @@ PY="${PY:-python3}"
 cd "$(dirname "$0")/../../../.."   # port root
 export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1}"
 export VLLM_WORKER_MULTIPROC_METHOD=spawn RAY_USAGE_STATS_ENABLED=0
+# See run_trloo_npu.sh: triton-ascend can't build against CANN 9.0.0 headers
+# (RT_LIMIT_TYPE_SIMT_WARP_STACK_SIZE was renamed *_DVG_*), so torch.compile fails.
+# Disable dynamo → eager. Override to 0 to A/B.
+export TORCHDYNAMO_DISABLE="${TORCHDYNAMO_DISABLE:-1}"
 ray stop --force >/dev/null 2>&1; rm -rf /tmp/ray 2>/dev/null
 train=$HOME/data/gsm8k/train.parquet ; test=$HOME/data/gsm8k/test.parquet
 TOTAL_ROLLOUT_STEPS="${TOTAL_ROLLOUT_STEPS:-24}"
