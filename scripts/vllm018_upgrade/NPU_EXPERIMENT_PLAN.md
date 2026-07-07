@@ -114,6 +114,9 @@ OOV mask 的 TP 分片修复(全局词表坐标)。
   ```
   看 analyzer 的:十分位直方图(早期位置有无异常)、top offending tokens(有无 "\n\n"/271 类)、
   首 token 异常数。
+  **CLEAN 2026-07-07(cards 2,3)**:pearson 0.9940、rollout_is_mean 0.9984、veto 0/0。45890
+  token 里仅 4 个 extreme(0.01%),token id 11/13/438/2704 各 1 次(**非固定 token,非 271**)。
+  → Austin 的 271 在本栈**不复现**;其问题限于 0.20/torch_npu 2.10。
 - [ ] **3b. TP2 + NZ=0(决定性实验)**:
   ```bash
   STEPS=2 PY=python TORCHDYNAMO_DISABLE=1 VLLM_ASCEND_ENABLE_NZ=0 VERL_LOGPROB_DIAG_DUMP=/tmp/lp_diag_nz0 ASCEND_RT_VISIBLE_DEVICES=0,1 bash scripts/vllm018_upgrade/rl/npu/run_trloo_npu.sh actor_rollout_ref.model.path=/home/canada_group_folder/ckpt/Qwen3-0.6B actor_rollout_ref.rollout.tensor_model_parallel_size=2 trainer.n_gpus_per_node=2 "+ray_kwargs.ray_init.runtime_env.env_vars.VERL_LOGPROB_DIAG_DUMP=/tmp/lp_diag_nz0" "+ray_kwargs.ray_init.runtime_env.env_vars.VLLM_ASCEND_ENABLE_NZ=0" 2>&1 | tee /tmp/npu_tp2_nz0.log

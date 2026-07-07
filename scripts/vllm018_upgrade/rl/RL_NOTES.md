@@ -433,3 +433,21 @@ measurable bias; the DKV_FP32_LOGPROB upcast is a harmless no-op safety net on t
 (Austin's ×0.94 Gap-A was a torch_npu 2.10 artifact). The seq-level RS band that produced
 their 97% masking is dry here (max_deviation 0.0038). Keep DKV_FP32_LOGPROB=1 default (cheap
 insurance, portable to 2.10 boxes); it is not load-bearing on 2.9.
+
+## NPU Phase 3a — bare TP2 + token dump (STEPS=2, cards 2,3) — CLEAN, no token-271
+
+Single-node colocated TP2 (`n_gpus_per_node=2 tensor_model_parallel_size=2`). Metrics:
+pearson **0.9940**, rollout_is_mean **0.9984**, `rollout_veto_seq_fraction`=0.0,
+`rollout_veto_catastrophic_token_fraction`=0.0 — all above gate. analyze_logprob_diag over
+45,890 valid tokens: **only 4 extreme (diff>0.5) = 0.01%**, 30 low-ratio (0.07%), in 4 distinct
+seqs (1 token each). Top offending ids = **11, 13, 438, 2704 — four DISTINCT ids, one each**;
+NOT a fixed-token spike. This is the categorical opposite of Austin's signature (single token
+271="\n\n" recurring → 97% seq masking). Position nuance: the 4 extremes fall in early deciles
+(0-1) rather than CUDA's tail (decile 9), but with 4 tokens across 4 ids that's noise, not a
+distribution, and none is 271. veto fractions 0.0 → nothing catastrophic.
+
+**Verdict (Austin token-271): does NOT reproduce on vllm-ascend 0.18 + torch_npu 2.9 + CANN9.**
+Our CUDA control already showed TP1≡TP2 (vllm core/verl integration exonerated); this NPU TP2
+run confirms the 0.18 Ascend kernel path is clean too. Austin's blowup is confined to their
+0.20 / torch_npu 2.10 stack (or their branch) — upgrading to this 0.18 combo is the fix.
+[3b NZ=0 pending as confirmation the matrix is clean with NZ on OR off.]
