@@ -18,7 +18,7 @@ torchdata
 transformers
 # vllm  # install separately; supported range 0.8.5-0.18.x (see setup.py [vllm] extra)
 wandb
-packaging>=20.0
+packaging>=26.2
 uvicorn
 fastapi
 latex2sympy2_extended
